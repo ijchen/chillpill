@@ -1,5 +1,9 @@
 # Major Version 0
 
+## v0.2.1 (IN DEVELOPMENT - ON_RELEASE: ensure entry is updated, remove this note)
+
+TODO
+
 ## v0.2.0
 
 - Added backtrace support

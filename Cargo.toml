@@ -6,7 +6,7 @@
 
 [package]
 name = "chillpill"
-version = "0.2.0"
+version = "0.2.1-indev" # ON_RELEASE: Bump version. Also, do all "ON_RELEASE" tasks
 authors = ["Isaac Chen"]
 edition = "2024"
 rust-version = "1.85.0" # NOTE: Also update in ci.yaml and scripts/ci.py when changed
@@ -18,6 +18,7 @@ license = "MIT OR Apache-2.0"
 keywords = ["panic", "catch_unwind", "catch", "error-handling"]
 categories = ["rust-patterns"]
 include = ["/src/", "/Cargo.toml", "/README.md", "/CHANGELOG.md", "/LICENSE-*"]
+publish = false # ON_RELEASE: Remove publish = false
 
 # # # # # # # # # # # # # # # # # # # #
 #                                     #
