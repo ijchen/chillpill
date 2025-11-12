@@ -2,7 +2,7 @@ use std::{any::Any, borrow::Cow};
 
 /// The source code location of a panic.
 // TODO(ichen): I'd really like this to be Copy and hold `file: &'static str`,
-// but that is blocked on https://github.com/rust-lang/rust/issues/131770
+// but that is blocked on https://github.com/rust-lang/rust/pull/146561
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PanicLocation {
     /// The source code file name where the panic was triggered.

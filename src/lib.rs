@@ -5,7 +5,11 @@
 // this "on release" comment removed (the above one should stay).
 //! [`std::panic::catch_unwind`]: std::panic::catch_unwind
 //! [`chillpill::catch`]: crate::catch
-#![cfg_attr(any(doc, test), doc = include_str!("../README.md"))]
+#![doc = include_str!("../README.md")]
+#![expect(
+    clippy::needless_doctest_main,
+    reason = "README.md contains example usage with a `fn main()` that also runs as a doctest"
+)]
 
 mod panic_data;
 mod panic_hook;
