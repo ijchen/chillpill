@@ -73,6 +73,5 @@ dual licensed as above, without any additional terms or conditions.
 docs.rs documentation links for rendered markdown (ex, on GitHub)
 These are overridden when include_str!(..)'d in lib.rs
 -->
-<!-- ON_RELEASE: the below link(s) should be updated, and this comment removed -->
 [`std::panic::catch_unwind`]: https://doc.rust-lang.org/std/panic/fn.catch_unwind.html
-[`chillpill::catch`]: https://docs.rs/chillpill/__CRATE_VERSION_HERE__/chillpill/fn.catch.html
+[`chillpill::catch`]: https://docs.rs/chillpill/0.2.0/chillpill/fn.catch.html
