@@ -13,94 +13,76 @@
 
 mod panic_data;
 mod panic_hook;
+mod thread_local_catch_stack;
 
-use std::{cell::RefCell, panic::UnwindSafe};
+use std::panic::UnwindSafe;
 
 pub use panic_data::{PanicData, PanicLocation};
-use panic_hook::{add_chillpill_thread, remove_chillpill_thread};
+
+use crate::thread_local_catch_stack::{
+    CaptureBacktrace, CatchStackFrame, THREAD_LOCAL_CATCH_STACK,
+};
 
 /// A specialized [`Result`] type for chillpill.
 pub type Result<T> = std::result::Result<T, PanicData>;
 
-thread_local! {
-    /// A thread-local stack of [`Option<PanicLocation>`]s, used to smuggle out
-    /// the location of a panic from the panic hook. Each frame on this stack
-    /// corresponds to one active call to [`chillpill::catch`] somewhere in the
-    /// current thread's stack frame.
-    ///
-    /// On any given thread, this stack starts out initially empty. Every time
-    /// `catch` is called, another frame is pushed to the top of the stack,
-    /// where it will live until the end of that `catch` call. Nested calls to
-    /// `catch` will grow the stack.
-    ///
-    /// Each frame starts as [`None`]. Anytime a panic occurs on a thread, the
-    /// chillpill custom panic hook will replace the value at the top of this
-    /// stack with the actual location of the panic. If some panics within a
-    /// `catch` call are caught before unwinding all the way back to `catch`
-    /// (ex., via [`std::panic::catch_unwind`]), the panic location that was
-    /// recorded for them at the top of the stack is not relevant (and would be
-    /// incorrect if `catch` were to use it). This is not a problem, because
-    /// `catch` will only extract and use the panic location if it actually
-    /// catches an unwinding panic - and if it does, it is guaranteed that that
-    /// panic was the last one to record its location at the top of the panic
-    /// location stack.
-    ///
-    /// Here is a basic summary of how this stack is used by both `catch` and
-    /// our custom panic hook:
-    ///
-    /// Each call to `catch` does the following:
-    /// 1. Push a `None` frame on entry
-    /// 2. Run the user-provided closure
-    /// 3. Pop that frame on exit (and, if the closure unwound, extract its
-    ///    `Some(PanicLocation)`).
-    ///
-    /// Meanwhile, our custom global panic hook:
-    /// - Delegates to the real hook if the thread local stack is empty
-    /// - Otherwise, replaces the top `None` with `Some(PanicLocation)` when any
-    ///   panic begins unwinding on this thread.
-    ///
-    /// This ensures all `catch` calls are able to reliably identify exactly
-    /// which (if any) panic location corresponds to the unwinding panic it
-    /// caught.
-    ///
-    /// [`chillpill::catch`]: crate::catch
-    static PANIC_LOCATION_STACK: RefCell<Vec<Option<PanicLocation>>> = const { RefCell::new(Vec::new()) };
-}
-
-/// Invokes a closure, capturing the cause and location of an unwinding panic if
-/// one occurs, and suppressing the default panic output on `stderr`.
+/// Invokes a closure, capturing the cause, location, and backtrace of an unwinding panic if one
+/// occurs, and suppressing the default panic output on `stderr`.
 ///
-/// This function is very similar to [`std::panic::catch_unwind`], with four
-/// key differences:
+/// This function is very similar to [`std::panic::catch_unwind`], with four key differences:
 ///
-/// 1. If the closure panics, this function reports the panic location (file,
-///    line, and column) in addition to the payload
-/// 2. This function suppresses the panic message that would normally be printed
-///    to `stderr` for all panics originating in the provided closure (and
-///    will prevent any other custom panic hook logic from running)
-/// 3. If the current thread is already unwinding from a panic when this
-///    function is called, a double-panic will occur immediately instead of only
-///    if/when the provided closure itself panics.
-/// 4. This function requires that no other code (on any thread) replaces the
-///    global panic hook while this function is executing (ex. through
-///    [`std::panic::set_hook`] or [`std::panic::take_hook`])
+/// 1. If the closure panics, this function reports the panic location (file, line, and column) and
+///    backtrace (see below) in addition to the payload
+/// 2. This function suppresses the panic message that would normally be printed to `stderr` for all
+///    panics originating in the provided closure (and will prevent any other custom panic hook
+///    logic from running)
+/// 3. The globally first call to this function must not be made from an unwinding thread. If you
+///    might call this function while unwinding (in a [`Drop`] impl, for example), an easy way to
+///    guarantee this condition is met is to call this function with an empty closure from the main
+///    thread at the start of the program.
+/// 4. The first time this function is called, it replaces the global panic hook with a chillpill
+///    custom one. See below for more information on this.
 ///
-/// # Panic Hook Warning
+/// # Backtrace Capture
 ///
-/// That fourth point above is important - in order to access panic location
-/// information and suppress the default error message, `chillpill` needs to
-/// temporarily swap out the global panic hook with its own custom one. Since
-/// the panic hook is a global resource, `chillpill` is not able to detect or
-/// prevent a situation where other code replaces our panic hook during the
-/// execution of this function.
+/// This function determines whether or not to capture a backtrace based on environment variable
+/// configuration, like [`std::backtrace::Backtrace::capture`]. To forcibly capture a backtrace
+/// regardless of environment variables, use the [`catch_force_backtrace`] function. Similarly, to
+/// unconditionally disable backtrace capture, use the [`catch_never_backtrace`] function.
 ///
-/// **If any other code on any thread replaces the panic hook at any point
-/// during the execution of this function, arbitrarily weird things may happen
-/// with the panic hook.**
+/// # Panic Hook Replacement
 ///
-/// This caveat does not apply to multiple concurrent calls to this function -
-/// [`chillpill::catch`] coordinates internally so that multiple calls will not
-/// fight over the panic hook.
+/// In order to access additional panic information and suppress the default error message,
+/// `chillpill` needs to replace the global panic hook with its own custom one. Since the panic hook
+/// is a global resource, `chillpill` is not able to detect or prevent a situation where other code
+/// replaces our panic hook with another one, which can cause unexpected behavior.
+///
+/// An easy way to prevent this is to ensure no other code replaces the panic hook at any point
+/// after the first call to this function. Replacing the panic hook is uncommon, so usually this is
+/// the easy (and correct) solution.
+///
+/// If other code does need to replace the panic hook, it must ensure that their panic hook invokes
+/// ours at some point during its execution for unwinding panics. That is sufficient to ensure
+/// chillpill can still capture panic information, although chillpill cannot prevent the new "outer"
+/// panic hook from printing to stderr if it attempts to.
+///
+/// # No Hook Panics
+///
+/// It is uncommon but possible for code to panic without invoking the panic hook (e.g., via
+/// [`std::panic::resume_unwind`]). These panics will still be captured by chillpill, but their
+/// panic location and backtrace will be incorrect. Typically, "incorrect" means they will be
+/// [`None`] and [`Backtrace::disabled()`] respectively.
+///
+/// The only exception is if:
+/// 1. An unwinding, hook-invoking panic occurs within the closure;
+/// 2. That panic is caught within the closure, *without* chillpill (e.g., via
+///    `std::panic::catch_unwind`); and
+/// 3. A second unwinding, *non-hook-invoking* panic occurs within the closure and escapes to be
+///    caught by this catch call.
+///
+/// In this case, the reported panic location and backtrace will correspond to the first (caught,
+/// hook-invoking) panic, but the payload will be from the second (uncaught, non-hook-invoking)
+/// panic.
 ///
 /// # Errors
 ///
@@ -108,40 +90,82 @@ thread_local! {
 ///
 /// # Panics
 ///
-/// If called from a panicking thread.
+/// If this is the globally first call to `chillpill::catch` (or the alternate backtrace variants),
+/// ***and*** this thread is currently unwinding from a panic.
+///
+/// [`catch_force_backtrace`]: catch_force_backtrace
+/// [`catch_never_backtrace`]: catch_never_backtrace
+/// [`Backtrace::disabled()`]: std::backtrace::Backtrace::disabled
+pub fn catch<F: FnOnce() -> R + UnwindSafe, R>(f: F) -> Result<R> {
+    catch_inner(f, CaptureBacktrace::Default)
+}
+
+/// Like [`chillpill::catch`], but always captures a backtrace. See its documentation for details.
+///
+/// # Errors
+///
+/// See [`chillpill::catch`].
+///
+/// # Panics
+///
+/// See [`chillpill::catch`].
 ///
 /// [`chillpill::catch`]: crate::catch
-pub fn catch<F: FnOnce() -> R + UnwindSafe, R>(f: F) -> Result<R> {
-    assert!(
-        !std::thread::panicking(),
-        "cannot call `chillpill::catch` from a panicking thread"
-    );
+pub fn catch_force_backtrace<F: FnOnce() -> R + UnwindSafe, R>(f: F) -> Result<R> {
+    catch_inner(f, CaptureBacktrace::Always)
+}
 
-    // If this thread was previously not in a `catch` call, register another
-    // thread as reliant on the chillpill panic hook.
-    if PANIC_LOCATION_STACK.with_borrow(Vec::is_empty) {
-        add_chillpill_thread();
+/// Like [`chillpill::catch`], but never captures a backtrace. See its documentation for details.
+///
+/// # Errors
+///
+/// See [`chillpill::catch`].
+///
+/// # Panics
+///
+/// See [`chillpill::catch`].
+///
+/// [`chillpill::catch`]: crate::catch
+pub fn catch_never_backtrace<F: FnOnce() -> R + UnwindSafe, R>(f: F) -> Result<R> {
+    catch_inner(f, CaptureBacktrace::Never)
+}
+
+fn catch_inner<F: FnOnce() -> R + UnwindSafe, R>(
+    f: F,
+    capture_backtrace: CaptureBacktrace,
+) -> Result<R> {
+    // Ensure the chillpill panic hook is installed
+    if let Err(()) = panic_hook::install_if_not_installed() {
+        panic!("the first call to `chillpill::catch` must not be made from a panicking thread");
     }
 
-    // Push a new frame onto our panic location stack. See the documentation on
-    // `PANIC_LOCATION_STACK` for details.
-    PANIC_LOCATION_STACK.with_borrow_mut(|stack| stack.push(None));
+    // Push a new frame corresponding to this call to `catch_inner`. See the documentation on
+    // `THREAD_LOCAL_CATCH_STACK` for details.
+    THREAD_LOCAL_CATCH_STACK.with_borrow_mut(|stack| {
+        stack.push(CatchStackFrame::new(capture_backtrace));
+    });
 
-    // Call the provided closure, using `std::panic::catch_unwind` to catch the
-    // panic payload and prevent further unwinding
+    // Call the provided closure, using `std::panic::catch_unwind` to catch the panic payload and
+    // prevent further unwinding
     let catch_unwind_result = std::panic::catch_unwind(f);
 
-    // Pop the panic location from our panic location stack. See the
-    // documentation on `PANIC_LOCATION_STACK` for details.
-    let location = PANIC_LOCATION_STACK.with_borrow_mut(|stack| stack.pop().unwrap());
+    // Pop this `catch_inner` call's frame. See the documentation on `THREAD_LOCAL_CATCH_STACK` for
+    // details.
+    let frame = THREAD_LOCAL_CATCH_STACK
+        .with_borrow_mut(Vec::pop)
+        .expect("catch stack should not be empty, since we just pushed a frame - this is a bug in chillpill");
 
-    // If this was the last `catch` call on this thread, unmark this thread as
-    // relying on the chillpill panic hook.
-    if PANIC_LOCATION_STACK.with_borrow(Vec::is_empty) {
-        remove_chillpill_thread();
-    }
+    // If the closure panicked, combine the payload, location, and backtrace into a `PanicData`
+    catch_unwind_result.map_err(|payload| {
+        let location = frame.location;
+        let backtrace = frame.backtrace;
 
-    catch_unwind_result.map_err(|payload| PanicData { payload, location })
+        PanicData {
+            payload,
+            location,
+            backtrace,
+        }
+    })
 }
 
 #[cfg(test)]
@@ -159,8 +183,8 @@ mod tests {
         assert_eq!(catch(|| String::from("it works!")).unwrap(), "it works!");
     }
 
-    /// This test ensures that [`chillpill::catch`] catches a panic (and its
-    /// payload) that triggered within the closure it was given.
+    /// This test ensures that [`chillpill::catch`] catches a panic (and its payload) that triggered
+    /// within the closure it was given.
     ///
     /// [`chillpill::catch`]: crate::catch
     #[test]
@@ -173,11 +197,11 @@ mod tests {
         assert_eq!(result.payload_as_string().unwrap(), "uh oh spaghettio");
     }
 
-    /// A helper macro to store the location of the invocation of this macro in
-    /// some variable before panicking.
+    /// A helper macro to store the location of the invocation of this macro in some variable before
+    /// panicking.
     ///
-    /// Relies on the fact that the expansion of the `file!`, `line!`, and
-    /// `column!` macros will occur after the expansion of this macro.
+    /// Relies on the fact that the expansion of the `file!`, `line!`, and `column!` macros will
+    /// occur after the expansion of this macro.
     macro_rules! panic_and_get_location {
         ($location:ident $(, $($arg:tt)*)*$(,)?) => {
             $location = ::core::option::Option::Some($crate::PanicLocation {
@@ -190,8 +214,8 @@ mod tests {
         };
     }
 
-    /// This test ensures that [`chillpill::catch`] records the correct panic
-    /// location for a panic that triggered within the closure it was given.
+    /// This test ensures that [`chillpill::catch`] records the correct panic location for a panic
+    /// that triggered within the closure it was given.
     ///
     /// [`chillpill::catch`]: crate::catch
     #[test]
@@ -206,23 +230,23 @@ mod tests {
         assert_eq!(result.location, location);
     }
 
-    /// This test ensures that [`chillpill::catch`] captures the panic payload
-    /// correctly when it isn't a [`String`] or [`&str`](str).
+    /// This test ensures that [`chillpill::catch`] captures the panic payload correctly when it
+    /// isn't a [`String`] or [`&str`](str).
     ///
     /// [`chillpill::catch`]: crate::catch
     #[test]
     fn non_string_payload() {
         let result = catch(|| {
             let payload: Vec<i32> = vec![1, 2, 3];
-            std::panic::resume_unwind(Box::new(payload));
+            std::panic::panic_any(payload);
         })
         .unwrap_err();
 
         assert_eq!(*result.payload.downcast::<Vec<i32>>().unwrap(), &[1, 2, 3]);
     }
 
-    /// This test ensures that multiple nested calls to [`chillpill::catch`]
-    /// correctly catch the location and payloads of every panic.
+    /// This test ensures that multiple nested calls to [`chillpill::catch`] correctly catch the
+    /// location and payloads of every panic.
     ///
     /// [`chillpill::catch`]: crate::catch
     #[test]
@@ -255,12 +279,11 @@ mod tests {
         assert_eq!(result1.location, location1);
     }
 
-    /// This test ensures that a [`std::panic::catch_unwind`] catching a panic
-    /// within a [`chillpill::catch`] that does not panic behaves as expected.
+    /// This test ensures that a [`std::panic::catch_unwind`] catching a panic within a
+    /// [`chillpill::catch`] that does not panic behaves as expected.
     ///
-    /// The expected behavior here is that the first `catch` call reports that
-    /// the closure did not panic, and subsequent calls to `catch` are not
-    /// affected.
+    /// The expected behavior here is that the first `catch` call reports that the closure did not
+    /// panic, and subsequent calls to `catch` are not affected.
     ///
     /// [`chillpill::catch`]: crate::catch
     #[test]
@@ -284,12 +307,12 @@ mod tests {
         assert_eq!(result.location, location);
     }
 
-    /// This test ensures that a [`std::panic::catch_unwind`] catching a panic
-    /// within a [`chillpill::catch`] that does panic behaves as expected.
+    /// This test ensures that a [`std::panic::catch_unwind`] catching a panic within a
+    /// [`chillpill::catch`] that does panic behaves as expected.
     ///
-    /// The expected behavior here is that the first `catch` call reports that
-    /// the closure panicked with the second panic's payload and location, and
-    /// subsequent calls to `catch` are not affected.
+    /// The expected behavior here is that the first `catch` call reports that the closure panicked
+    /// with the second panic's payload and location, and subsequent calls to `catch` are not
+    /// affected.
     ///
     /// [`chillpill::catch`]: crate::catch
     #[test]

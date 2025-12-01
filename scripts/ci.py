@@ -150,13 +150,9 @@ def run_tests_msrv() -> None:
 
 def run_tests_leak_sanitizer() -> None:
     """Run tests with leak sanitizer."""
-    # TODO: remove loom workaround unless we're actually using loom
-    # NOTE: loom seems to make the leak sanitizer unhappy. I don't think that
-    # combination of tests is important, so we just skip loom tests here.
-
     print_header("Running tests with leak sanitizer...")
     run_command(
-        ["cargo", "+nightly", "test", "--", "--skip", "loom"],
+        ["cargo", "+nightly", "test"],
         env={"RUSTFLAGS": "-D warnings -Z sanitizer=leak"},
     )
 
