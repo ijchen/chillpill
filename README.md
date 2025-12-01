@@ -74,4 +74,4 @@ docs.rs documentation links for rendered markdown (ex, on GitHub)
 These are overridden when include_str!(..)'d in lib.rs
 -->
 [`std::panic::catch_unwind`]: https://doc.rust-lang.org/std/panic/fn.catch_unwind.html
-[`chillpill::catch`]: https://docs.rs/chillpill/0.1.0/chillpill/fn.catch.html
+[`chillpill::catch`]: https://docs.rs/chillpill/0.2.0/chillpill/fn.catch.html

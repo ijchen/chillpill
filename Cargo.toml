@@ -6,10 +6,10 @@
 
 [package]
 name = "chillpill"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Isaac Chen"]
 edition = "2024"
-rust-version = "1.85.0" # NOTE: Also update in ci.yaml and ci.sh when changed
+rust-version = "1.85.0" # NOTE: Also update in ci.yaml and scripts/ci.py when changed
 description = "A more powerful (and more restrictive) `std::panic::catch_unwind`"
 documentation = "https://docs.rs/chillpill"
 readme = "README.md"
