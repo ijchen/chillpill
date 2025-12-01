@@ -1,6 +1,6 @@
 # Major Version 0
 
-## v0.2.0 (IN DEVELOPMENT)
+## v0.2.0
 
 - Added backtrace support
   - `PanicData` now includes a `backtrace` field
